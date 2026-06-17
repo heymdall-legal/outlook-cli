@@ -287,7 +287,29 @@ const CODE_PAGES = [
     MobileOperator: 0x22,
   }),
   createCodePage("DocumentLibrary", {}),
-  createCodePage("ItemOperations", {}),
+  createCodePage("ItemOperations", {
+    ItemOperations: 0x05,
+    Fetch: 0x06,
+    Store: 0x07,
+    Options: 0x08,
+    Range: 0x09,
+    Total: 0x0a,
+    Properties: 0x0b,
+    Data: 0x0c,
+    Status: 0x0d,
+    Response: 0x0e,
+    Version: 0x0f,
+    Schema: 0x10,
+    Part: 0x11,
+    EmptyFolderContents: 0x12,
+    DeleteSubFolders: 0x13,
+    UserName: 0x14,
+    Password: 0x15,
+    Move: 0x16,
+    DstFldId: 0x17,
+    ConversationId: 0x18,
+    MoveAlways: 0x19,
+  }),
   createCodePage("ComposeMail", {}),
   createCodePage("Email2", {
     UmCallerID: 0x05,
@@ -561,6 +583,10 @@ function splitTag(value) {
 function prefixToNamespace(prefix) {
   if (prefix === "airsyncbase") {
     return "AirSyncBase";
+  }
+
+  if (prefix === "airsync") {
+    return "AirSync";
   }
 
   return prefix.charAt(0).toUpperCase() + prefix.slice(1);
