@@ -165,7 +165,6 @@ export class ActiveSyncClient {
     windowSize: number;
     since?: Date;
   }): Promise<NormalizedMailboxMessage[]> {
-    void since;
     const messages: NormalizedMailboxMessage[] = [];
     let syncKey = "0";
 
@@ -178,32 +177,40 @@ export class ActiveSyncClient {
           syncKey,
           collectionId,
           windowSize,
-        })
+        }),
       );
       const parsed = parseSyncXml(xml);
       if (parsed.status && parsed.status !== "1") {
         throw new Error(`Sync failed with ActiveSync status ${parsed.status}. Raw response: ${compactXml(xml)}`);
       }
       syncKey = parsed.syncKey || syncKey;
-      messages.push(
-        ...normalizeSyncMessages(parsed.messages).map((message) => ({
-          mailbox,
-          message,
-        }))
-      );
 
-      if (this.config.verbose) {
-        this.logger.error(
-          `Sync ${mailbox} page ${page + 1}: requestSyncKey=${requestSyncKey}, responseSyncKey=${parsed.syncKey}, messages=${parsed.messages.length}, moreAvailable=${parsed.moreAvailable}`
-        );
-      }
+      const pageMessages = normalizeSyncMessages(parsed.messages).map((message) => ({
+        mailbox,
+        message,
+      }));
+      messages.push(...pageMessages);
 
       if (requestSyncKey === "0" && parsed.messages.length === 0 && syncKey !== "0") {
         continue;
       }
 
+      if (
+        since &&
+        pageMessages.length > 0 &&
+        pageMessages.every((entry) => isOlderThan(entry.message.receivedAt, since))
+      ) {
+        break;
+      }
+
       if (!parsed.moreAvailable) {
         break;
+      }
+
+      if (page === maxPages - 1) {
+        this.logger.error(
+          `Warning: reached the ${maxPages}-page sync limit for ${mailbox}; messages within the requested window may be missing. Increase --max-pages.`,
+        );
       }
     }
 
@@ -325,6 +332,11 @@ export class ActiveSyncClient {
 
 function compactXml(xml: string): string {
   return xml.replace(/\s+/g, " ").trim();
+}
+
+function isOlderThan(receivedAt: string, cutoff: Date): boolean {
+  const date = new Date(receivedAt);
+  return !Number.isNaN(date.valueOf()) && date < cutoff;
 }
 
 function buildCommandUrl(endpoint: string, command: string, config: ActiveSyncClientConfig): string {
