@@ -2,12 +2,15 @@ import type { ActiveSyncClientConfig, MailboxKind, NormalizedMailboxMessage } fr
 import { classifyHttpError, discoverEndpoint } from "./discovery.js";
 import {
   buildFolderSyncRequestXml,
+  buildItemOperationsFetchXml,
   buildSyncRequestXml,
   findInboxFolder,
   findOutboxFolder,
   normalizeSyncMessages,
   parseFolderSyncXml,
+  parseItemOperationsXml,
   parseSyncXml,
+  type FolderRecord,
 } from "./parser.js";
 import {
   buildInitialProvisionRequestXml,
@@ -38,9 +41,9 @@ type FetchLike = (
 
 interface MailboxMessageOptions {
   days?: number;
+  since?: Date;
   maxPages?: number;
   windowSize?: number;
-  reprovisionAttempts?: number;
 }
 
 interface ExecuteCommandOptions {
@@ -80,68 +83,73 @@ export class ActiveSyncClient {
     return this.endpoint;
   }
 
-  async getMailboxMessages({
-    days,
-    maxPages = 10,
-    windowSize = 50,
-    reprovisionAttempts = 0,
-  }: MailboxMessageOptions = {}): Promise<NormalizedMailboxMessage[]> {
-    void days;
+  async resolveMailFolders(reprovisionAttempts = 0): Promise<{
+    inbox: FolderRecord;
+    sent: FolderRecord | null;
+  }> {
     await this.ensureEndpoint();
 
     const folderSyncXml = await this.executeCommand("FolderSync", buildFolderSyncRequestXml("0"));
     const folderSync = parseFolderSyncXml(folderSyncXml);
-    const inbox = findInboxFolder(folderSync.folders);
-    const outbox = findOutboxFolder(folderSync.folders);
 
     if (folderSync.status === "142" || folderSync.status === "144") {
       if (reprovisionAttempts >= 1) {
         throw new Error(
           `FolderSync failed with ActiveSync status ${folderSync.status} after reprovision retry. Raw response: ${compactXml(
-            folderSyncXml
-          )}`
+            folderSyncXml,
+          )}`,
         );
       }
-
       await this.performProvisioning();
-      return this.getMailboxMessages({
-        days,
-        maxPages,
-        windowSize,
-        reprovisionAttempts: reprovisionAttempts + 1,
-      });
+      return this.resolveMailFolders(reprovisionAttempts + 1);
     }
 
     if (folderSync.status !== "1") {
       throw new Error(
-        `FolderSync failed with ActiveSync status ${folderSync.status}. Raw response: ${compactXml(folderSyncXml)}`
+        `FolderSync failed with ActiveSync status ${folderSync.status}. Raw response: ${compactXml(folderSyncXml)}`,
       );
     }
 
+    const inbox = findInboxFolder(folderSync.folders);
     if (!inbox) {
       throw new Error(
         `Inbox folder not found in FolderSync response. Folders seen: ${JSON.stringify(
-          folderSync.folders
-        )}. Raw response: ${compactXml(folderSyncXml)}`
+          folderSync.folders,
+        )}. Raw response: ${compactXml(folderSyncXml)}`,
       );
     }
+
+    return { inbox, sent: findOutboxFolder(folderSync.folders) };
+  }
+
+  async getMailboxMessages({
+    days,
+    since,
+    maxPages = 50,
+    windowSize = 50,
+  }: MailboxMessageOptions = {}): Promise<NormalizedMailboxMessage[]> {
+    void days;
+
+    const { inbox, sent } = await this.resolveMailFolders();
 
     const inboxMessages = await this.syncFolderMessages({
       mailbox: "inbox",
       collectionId: inbox.serverId,
       maxPages,
       windowSize,
+      since,
     });
-    const outboxMessages = outbox
+    const sentMessages = sent
       ? await this.syncFolderMessages({
           mailbox: "sent",
-          collectionId: outbox.serverId,
+          collectionId: sent.serverId,
           maxPages,
           windowSize,
+          since,
         })
       : [];
 
-    return [...inboxMessages, ...outboxMessages];
+    return [...inboxMessages, ...sentMessages];
   }
 
   async syncFolderMessages({
@@ -149,12 +157,15 @@ export class ActiveSyncClient {
     collectionId,
     maxPages,
     windowSize,
+    since,
   }: {
     mailbox: MailboxKind;
     collectionId: string;
     maxPages: number;
     windowSize: number;
+    since?: Date;
   }): Promise<NormalizedMailboxMessage[]> {
+    void since;
     const messages: NormalizedMailboxMessage[] = [];
     let syncKey = "0";
 
@@ -197,6 +208,50 @@ export class ActiveSyncClient {
     }
 
     return messages;
+  }
+
+  async fetchMessage({
+    collectionId,
+    serverId,
+  }: {
+    collectionId: string;
+    serverId: string;
+  }): Promise<NormalizedMailboxMessage["message"] | null> {
+    const xml = await this.executeCommand(
+      "ItemOperations",
+      buildItemOperationsFetchXml({
+        protocolVersion: this.config.protocolVersion,
+        collectionId,
+        serverId,
+      }),
+    );
+
+    const parsed = parseItemOperationsXml(xml);
+    if (!parsed.message) {
+      return null;
+    }
+
+    return normalizeSyncMessages([parsed.message])[0] ?? null;
+  }
+
+  async getMessageById({ serverId }: { serverId: string }): Promise<NormalizedMailboxMessage | null> {
+    const { inbox, sent } = await this.resolveMailFolders();
+
+    const candidates: Array<{ mailbox: MailboxKind; collectionId: string }> = [
+      { mailbox: "inbox", collectionId: inbox.serverId },
+    ];
+    if (sent) {
+      candidates.push({ mailbox: "sent", collectionId: sent.serverId });
+    }
+
+    for (const candidate of candidates) {
+      const message = await this.fetchMessage({ collectionId: candidate.collectionId, serverId });
+      if (message) {
+        return { mailbox: candidate.mailbox, message };
+      }
+    }
+
+    return null;
   }
 
   async performProvisioning(): Promise<void> {
