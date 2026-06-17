@@ -180,3 +180,69 @@ function escapeXml(value: string): string {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
 }
+
+export function buildItemOperationsFetchXml({
+  protocolVersion = "14.1",
+  collectionId,
+  serverId,
+  truncationSize = 200000,
+}: {
+  protocolVersion?: string;
+  collectionId: string;
+  serverId: string;
+  truncationSize?: number;
+}): string {
+  void protocolVersion;
+
+  return (
+    '<?xml version="1.0" encoding="utf-8"?>' +
+    '<ItemOperations xmlns="ItemOperations:" xmlns:airsync="AirSync:" xmlns:airsyncbase="AirSyncBase:">' +
+    "<Fetch><Store>Mailbox</Store>" +
+    `<airsync:CollectionId>${escapeXml(collectionId)}</airsync:CollectionId>` +
+    `<airsync:ServerId>${escapeXml(serverId)}</airsync:ServerId>` +
+    "<Options><airsyncbase:BodyPreference>" +
+    "<airsyncbase:Type>1</airsyncbase:Type>" +
+    `<airsyncbase:TruncationSize>${truncationSize}</airsyncbase:TruncationSize>` +
+    "</airsyncbase:BodyPreference></Options>" +
+    "</Fetch></ItemOperations>"
+  );
+}
+
+export interface ItemOperationsResult {
+  status: string;
+  message: ParsedSyncMessage | null;
+}
+
+export function parseItemOperationsXml(xml: string): ItemOperationsResult {
+  const topStatus = getFirstTagText(xml, "Status");
+  const fetchBlock = getAllTagBlocks(xml, "Fetch")[0] ?? "";
+
+  if (!fetchBlock) {
+    return { status: topStatus, message: null };
+  }
+
+  const fetchStatus = getFirstTagText(fetchBlock, "Status") || topStatus;
+  const properties = getAllTagBlocks(fetchBlock, "Properties")[0] ?? "";
+  const serverId = getFirstTagText(fetchBlock, "ServerId");
+
+  if (!serverId && !properties) {
+    return { status: fetchStatus, message: null };
+  }
+
+  return {
+    status: fetchStatus,
+    message: {
+      serverId,
+      applicationData: {
+        subject: getFirstTagText(properties, "Subject"),
+        from: getFirstTagText(properties, "From"),
+        to: getFirstTagText(properties, "To"),
+        cc: getFirstTagText(properties, "Cc"),
+        dateReceived: getFirstTagText(properties, "DateReceived"),
+        bodyType: getFirstTagText(properties, "Type"),
+        bodyData: getFirstTagText(properties, "Data"),
+        bodyPreview: getFirstTagText(properties, "Preview"),
+      },
+    },
+  };
+}
