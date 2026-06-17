@@ -1,4 +1,25 @@
 {
   "name": "outlook-activesync-cli",
-  "packageManager": "yarn@4.17.0"
+  "version": "0.1.0",
+  "packageManager": "yarn@4.17.0",
+  "type": "module",
+  "bin": {
+    "outlook": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "keytar": "^7.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
 }
