@@ -46,3 +46,11 @@ outlook emails list --output json         # JSON output (default is text)
 - `--body` — include full plain-text bodies in `list`.
 - `--max-pages <N>` — safety cap on sync pages per mailbox (default 50). A warning is printed to stderr if the cap is hit while more mail within the window may remain.
 - `--output <text|json>` — output format (default text).
+
+## Use with AI agents
+
+This package ships an agent skill at [`skills/outlook-cli`](skills/outlook-cli/SKILL.md) that teaches agents how to drive the `outlook` CLI. Install it with the [skills](https://www.npmjs.com/package/skills) tool:
+
+```bash
+npx skills add https://github.com/heymdall-legal/outlook-cli
+```
