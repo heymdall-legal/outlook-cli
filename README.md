@@ -5,6 +5,14 @@ A command-line client for reading Outlook/Exchange mailboxes over ActiveSync.
 ## Install
 
 ```bash
+npm install -g outlook-activesync-cli
+```
+
+This installs the `outlook` binary globally.
+
+### Development install
+
+```bash
 yarn install
 yarn build
 yarn link   # exposes the `outlook` binary, or run via `node dist/index.js`
