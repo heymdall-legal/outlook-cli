@@ -28,30 +28,40 @@ The CLI reuses two existing codebases:
 From reading `outlook-example/activesync/`:
 
 - `ActiveSyncClient.getMailboxMessages()` performs endpoint discovery →
-  Provision → FolderSync → paginated Sync, returning **all recent messages
-  (up to ~500: `maxPages` 10 × `windowSize` 50) with full bodies already
-  included**. There is no server-side time filtering and no fetch-by-id at the
-  protocol layer; the `days` argument is ignored inside the client and filtering
-  happens locally.
+  FolderSync → paginated Sync, **provisioning only if FolderSync reports status
+  142/144** (the example client does *not* provision unconditionally up front).
+  Inbox and Sent are synced **separately**, each capped at `maxPages` 10 ×
+  `windowSize` 50 (≈500 messages **per mailbox**, ≈1000 merged). There is no
+  server-side time filtering and no fetch-by-id at the protocol layer; the `days`
+  argument is currently ignored inside the client and filtering happens locally.
 - The Sync request uses `BodyPreference` Type 1 (plain text), so `bodyText` is
   populated for normal messages; HTML-only messages fall back to `preview`.
 - `NormalizedMessage` already carries everything the CLI needs:
   `id, subject, from, to[], cc[], receivedAt, preview, bodyText, bodyHtml`.
+- The source `types.ts` names the two mailboxes `MailboxKind = "inbox" |
+  "outbox"`, even though `findOutboxFolder` actually targets the **Sent Items**
+  folder. The CLI normalizes this to `"sent"` (see §5.1) so the user-facing
+  option, text output, and JSON all agree.
 
 Consequences:
 
 - Time-window filtering and the merged Inbox+Sent view are done **locally**
   after a sync.
-- Reliable fetch-by-id requires a **new** `ItemOperations` Fetch command added to
-  the client (the one genuinely new piece of protocol code).
+- To honour the requested time window correctly, the `list` paging strategy must
+  page **until the cutoff is covered or pages are exhausted**, not stop at a
+  fixed cap (see §6.1).
+- Fetch-by-id requires a **new** `ItemOperations` Fetch command added to the
+  client (the one genuinely new piece of protocol code). It resolves any id that
+  lives in the Inbox or Sent folder — the only folders this CLI reads.
 
 ## 3. Decisions
 
 | Topic | Decision |
 | --- | --- |
 | Listing command shape | One `emails list` command; `--body` flag adds full bodies. Separate `emails get <id>`. |
-| Mailboxes | Read **Inbox + Sent**. `list` shows both merged by default; `--mailbox inbox\|sent` narrows. |
-| Fetch by id | Implement a real `ItemOperations` Fetch in the client (reliable for any id). |
+| Mailboxes | Read **Inbox + Sent**. `list` shows both merged by default; `--mailbox inbox\|sent` narrows. Source `outbox` kind is normalized to `sent`. |
+| Fetch by id | Implement a real `ItemOperations` Fetch in the client (reliable for any listed Inbox/Sent id). |
+| Time-window paging | Page each folder until the cutoff is covered or pages exhausted; `--max-pages` is a safety cap. |
 | Binary name | `outlook` |
 | Default time window | 24 hours |
 | List row format | `mailbox · receivedAt · id · subject · from` |
@@ -98,14 +108,28 @@ Config fields:
 - Device identifiers (`deviceId`, `deviceType`, user agent, etc.) keep the
   hard-coded iPhone defaults from `getOutlookEmails`; not user-configurable.
 
+### 5.1 Mailbox naming normalization
+
+The reused source uses `MailboxKind = "inbox" | "outbox"` even though the
+"outbox" record is really the **Sent Items** folder. To keep the user-facing
+option, text rows, and JSON consistent, the adapted copy renames this kind to
+`"sent"`:
+
+- `types.ts` — `MailboxKind = "inbox" | "sent"`.
+- `parser.ts` / `client.ts` — the existing `findOutboxFolder` lookup is retained
+  but its result is tagged `mailbox: "sent"`.
+
+So `--mailbox sent`, the `mailbox` field in text rows, and `mailbox` in JSON all
+read `sent`; nothing emits `outbox`.
+
 ### `config` commands
 
 - **`config init`** — prompts for email, username, password, host; **verifies**
-  by running discovery → Provision → FolderSync; on success writes config file +
-  saves password to keyring. Mirrors `cli-example`'s `config init` flow
-  (prompt → verify via a live call → persist).
-- **`config verify`** — re-runs discovery → Provision → FolderSync against the
-  saved config and reports success/failure.
+  by running FolderSync (provisioning if the server returns status 142/144);
+  on success writes config file + saves password to keyring. Mirrors
+  `cli-example`'s `config init` flow (prompt → verify via a live call → persist).
+- **`config verify`** — re-runs the same discovery → FolderSync (+ provision on
+  142/144) check against the saved config and reports success/failure.
 - **`config show`** — prints saved config with the password redacted (`****`).
 
 ## 6. Email commands
@@ -119,6 +143,7 @@ Options:
 - `--hours <N>` — lookback window in hours (default `24`).
 - `--mailbox <inbox|sent>` — restrict to one mailbox (default: both, merged).
 - `--body` — include the full plain-text body for each message.
+- `--max-pages <N>` — safety cap on Sync pages per mailbox (default `50`).
 - `--output <text|json>` — default `text`.
 
 Behaviour:
@@ -127,11 +152,32 @@ Behaviour:
 - Each text row: `mailbox · receivedAt · id · subject · from`.
 - With `--body`, each entry is followed by its body (`bodyText`, falling back to
   `preview` when empty).
-- JSON output emits the `NormalizedMailboxMessage` / `NormalizedMessage` shape.
+- JSON output emits the `NormalizedMailboxMessage` / `NormalizedMessage` shape,
+  with `mailbox` being `"inbox"` or `"sent"`.
+
+#### 6.1 Time-window paging guarantee
+
+The example client stops syncing after a fixed `maxPages` cap, which could
+**silently drop messages that fall inside the requested window** when a folder
+holds more than the cap before reaching the cutoff. To avoid that, the `list`
+wrapper changes the stop condition: for each folder it keeps requesting Sync
+pages until **either** the server reports no more data (`MoreAvailable` absent)
+**or** an entire page contains only messages older than the cutoff, **or** the
+`--max-pages` safety cap is hit.
+
+- EAS initial Sync is not guaranteed to be globally ordered, so the "whole page
+  older than cutoff" stop is a heuristic; the primary stop is "no more pages."
+  The `--max-pages` default (50 × `windowSize` 50 ≈ 2500 msgs/folder) is high
+  enough that normal windows are fully covered while bounding pathological runs.
+- If the `--max-pages` cap is reached while messages within the window may still
+  remain, the CLI prints a warning to stderr so the result is never silently
+  truncated.
 
 ### `emails get <id> [options]`
 
-Fetches a single full email by id.
+Fetches a single full email by id. Scope: **any id that lives in the Inbox or
+Sent folder** — the folders this CLI reads, and the source of every id shown by
+`list`. Ids in other folders are out of scope (§10).
 
 - Runs FolderSync to resolve the Inbox and Sent collection ids.
 - Issues an **`ItemOperations` Fetch** by `ServerId`, trying Inbox then Sent
